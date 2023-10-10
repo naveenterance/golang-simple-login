@@ -5,7 +5,10 @@ import (
 	"fmt"
 	"html/template"
 	"net/http"
+	"unicode"
 
+	"github.com/gorilla/context"
+	"github.com/gorilla/sessions"
 	"golang.org/x/crypto/bcrypt"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -13,6 +16,11 @@ import (
 
 var tpl *template.Template
 var db *sql.DB
+
+// var store = sessions.NewCookieStore([]byte(os.Getenv("SESSION_KEY")))
+// don't store key in source code, pass in via a environment variable to avoid accidentally commit it with code
+// func NewCookieStore(keyPairs ...[]byte) *CookieStore
+var store = sessions.NewCookieStore([]byte("super-secret"))
 
 func main() {
 	tpl, _ = template.ParseGlob("templates/*.html")
@@ -24,9 +32,13 @@ func main() {
 	defer db.Close()
 	http.HandleFunc("/login", loginHandler)
 	http.HandleFunc("/loginauth", loginAuthHandler)
+	http.HandleFunc("/logout", logoutHandler)
 	http.HandleFunc("/register", registerHandler)
 	http.HandleFunc("/registerauth", registerAuthHandler)
-	http.ListenAndServe("localhost:8080", nil)
+	http.HandleFunc("/about", aboutHandler)
+	http.HandleFunc("/", indexHandler)
+	// // if you are not using gorilla/mux, you need to wrap your handler with context.ClearHandler
+	http.ListenAndServe("localhost:8080", context.ClearHandler(http.DefaultServeMux))
 }
 
 // loginHandler serves form for users to login with
@@ -43,10 +55,10 @@ func loginAuthHandler(w http.ResponseWriter, r *http.Request) {
 	password := r.FormValue("password")
 	fmt.Println("username:", username, "password:", password)
 	// retrieve password from db to compare (hash) with user supplied password's hash
-	var hash string
-	stmt := "SELECT Hash FROM bcrypt WHERE Username = ?"
+	var userID, hash string
+	stmt := "SELECT UserID, Hash FROM bcrypt WHERE Username = ?"
 	row := db.QueryRow(stmt, username)
-	err := row.Scan(&hash)
+	err := row.Scan(&userID, &hash)
 	fmt.Println("hash from db:", hash)
 	if err != nil {
 		fmt.Println("error selecting Hash in db by Username")
@@ -54,25 +66,62 @@ func loginAuthHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// func CompareHashAndPassword(hashedPassword, password []byte) error
+	// CompareHashAndPassword() returns err with a value of nil for a match
 	err = bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
-	// returns nill on succcess
 	if err == nil {
-		fmt.Fprint(w, "You have successfully logged in :)")
+		// Get always returns a session, even if empty
+		// returns error if exists and could not be decoded
+		// Get(r *http.Request, name string) (*Session, error)
+		session, _ := store.Get(r, "session")
+		// session struct has field Values map[interface{}]interface{}
+		session.Values["userID"] = userID
+		// save before writing to response/return from handler
+		session.Save(r, w)
+		tpl.ExecuteTemplate(w, "index.html", "Logged In")
 		return
 	}
 	fmt.Println("incorrect password")
 	tpl.ExecuteTemplate(w, "login.html", "check username and password")
+}
 
+func indexHandler(w http.ResponseWriter, r *http.Request) {
+	fmt.Println("*****indexHandler running*****")
+	session, _ := store.Get(r, "session")
+	_, ok := session.Values["userID"]
+	fmt.Println("ok:", ok)
+	if !ok {
+		http.Redirect(w, r, "/login", http.StatusFound) // http.StatusFound is 302
+		return
+	}
+	tpl.ExecuteTemplate(w, "index.html", "Logged In")
+}
+
+func aboutHandler(w http.ResponseWriter, r *http.Request) {
+	fmt.Println("*****aboutHandler running*****")
+	session, _ := store.Get(r, "session")
+	_, ok := session.Values["userID"]
+	fmt.Println("ok:", ok)
+	if !ok {
+		http.Redirect(w, r, "/login", http.StatusFound) // http.StatusFound is 302
+		return
+	}
+	tpl.ExecuteTemplate(w, "about.html", "Logged In")
+}
+
+func logoutHandler(w http.ResponseWriter, r *http.Request) {
+	fmt.Println("*****logoutHandler running*****")
+	session, _ := store.Get(r, "session")
+	// The delete built-in function deletes the element with the specified key (m[key]) from the map.
+	// If m is nil or there is no such element, delete is a no-op.
+	delete(session.Values, "userID")
+	session.Save(r, w)
+	tpl.ExecuteTemplate(w, "login.html", "Logged Out")
 }
 
 // registerHandler serves form for registring new users
 func registerHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Println("*****registerHandler running*****")
-	err := tpl.ExecuteTemplate(w, "register.html", nil)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
+	tpl.ExecuteTemplate(w, "register.html", nil)
 }
 
 // registerAuthHandler creates new user in database
@@ -89,7 +138,7 @@ func registerAuthHandler(w http.ResponseWriter, r *http.Request) {
 	r.ParseForm()
 	username := r.FormValue("username")
 	// check username for only alphaNumeric characters
-	/*var nameAlphaNumeric = true
+	var nameAlphaNumeric = true
 	for _, char := range username {
 		// func IsLetter(r rune) bool, func IsNumber(r rune) bool
 		// if !unicode.IsLetter(char) && !unicode.IsNumber(char) {
@@ -102,40 +151,39 @@ func registerAuthHandler(w http.ResponseWriter, r *http.Request) {
 	if 5 <= len(username) && len(username) <= 50 {
 		nameLength = true
 	}
-	// check password criteria*/
-	password := r.FormValue("password") /*
-		fmt.Println("password:", password, "\npswdLength:", len(password))
-		// variables that must pass for password creation criteria
-		var pswdLowercase, pswdUppercase, pswdNumber, pswdSpecial, pswdLength, pswdNoSpaces bool
-		pswdNoSpaces = true
-		for _, char := range password {
-			switch {
-			// func IsLower(r rune) bool
-			case unicode.IsLower(char):
-				pswdLowercase = true
-			// func IsUpper(r rune) bool
-			case unicode.IsUpper(char):
-				pswdUppercase = true
-			// func IsNumber(r rune) bool
-			case unicode.IsNumber(char):
-				pswdNumber = true
-			// func IsPunct(r rune) bool, func IsSymbol(r rune) bool
-			case unicode.IsPunct(char) || unicode.IsSymbol(char):
-				pswdSpecial = true
-			// func IsSpace(r rune) bool, type rune = int32
-			case unicode.IsSpace(int32(char)):
-				pswdNoSpaces = false
-			}
+	// check password criteria
+	password := r.FormValue("password")
+	fmt.Println("password:", password, "\npswdLength:", len(password))
+	// variables that must pass for password creation criteria
+	var pswdLowercase, pswdUppercase, pswdNumber, pswdSpecial, pswdLength, pswdNoSpaces bool
+	pswdNoSpaces = true
+	for _, char := range password {
+		switch {
+		// func IsLower(r rune) bool
+		case unicode.IsLower(char):
+			pswdLowercase = true
+		// func IsUpper(r rune) bool
+		case unicode.IsUpper(char):
+			pswdUppercase = true
+		// func IsNumber(r rune) bool
+		case unicode.IsNumber(char):
+			pswdNumber = true
+		// func IsPunct(r rune) bool, func IsSymbol(r rune) bool
+		case unicode.IsPunct(char) || unicode.IsSymbol(char):
+			pswdSpecial = true
+		// func IsSpace(r rune) bool, type rune = int32
+		case unicode.IsSpace(int32(char)):
+			pswdNoSpaces = false
 		}
-		if 11 < len(password) && len(password) < 60 {
-			pswdLength = true
-		}
-		fmt.Println("pswdLowercase:", pswdLowercase, "\npswdUppercase:", pswdUppercase, "\npswdNumber:", pswdNumber, "\npswdSpecial:", pswdSpecial, "\npswdLength:", pswdLength, "\npswdNoSpaces:", pswdNoSpaces, "\nnameAlphaNumeric:", nameAlphaNumeric, "\nnameLength:", nameLength)
-		if !pswdLowercase || !pswdUppercase || !pswdNumber || !pswdSpecial || !pswdLength || !pswdNoSpaces || !nameAlphaNumeric || !nameLength {
-			tpl.ExecuteTemplate(w, "register.html", "please check username and password criteria")
-			return
-		}
-	*/
+	}
+	if 11 < len(password) && len(password) < 60 {
+		pswdLength = true
+	}
+	fmt.Println("pswdLowercase:", pswdLowercase, "\npswdUppercase:", pswdUppercase, "\npswdNumber:", pswdNumber, "\npswdSpecial:", pswdSpecial, "\npswdLength:", pswdLength, "\npswdNoSpaces:", pswdNoSpaces, "\nnameAlphaNumeric:", nameAlphaNumeric, "\nnameLength:", nameLength)
+	if !pswdLowercase || !pswdUppercase || !pswdNumber || !pswdSpecial || !pswdLength || !pswdNoSpaces || !nameAlphaNumeric || !nameLength {
+		tpl.ExecuteTemplate(w, "register.html", "please check username and password criteria")
+		return
+	}
 	// check if username already exists for availability
 	stmt := "SELECT UserID FROM bcrypt WHERE username = ?"
 	row := db.QueryRow(stmt, username)
